@@ -149,4 +149,4 @@ All runnable scripts and parsers are located in `./scripts`.
 
  1. verification mode doesn't work!
     * dump weights and intermediate data from tensorflow (while executing any workloads)
-    * If you can't get the formats of verification files, please contact to joonsung90@snu.ac.kr for more details
+    * If you cannot understand the formats of verification files, please send an email at joonsung90@snu.ac.kr for more details
