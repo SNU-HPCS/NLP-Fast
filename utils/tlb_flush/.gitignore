@@ -1,0 +1,8 @@
+.tmp_versions/
+*.ko
+*.cmd
+*.o
+Module.symvers
+flush_tlb.mod.c
+flush_tlb.o.ur-safe
+modules.order

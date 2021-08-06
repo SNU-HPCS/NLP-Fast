@@ -1,0 +1,15 @@
+.idea
+model/build
+model/.idea
+model/cmake-build-debug
+gpu_model/build
+gpu_model/.idea
+gpu_model/cmake-build-debug
+gpu_model/cmake-build-debug_cpu/
+gpu_model/nvvp_workspace
+verification.tar.gz
+verification/
+scripts/.idea
+expdata/
+random_chunks/
+*.csv
