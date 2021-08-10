@@ -142,7 +142,7 @@ $./gpu_multi_baseline -m 1 -n {num_gpus} ../../verification/smallset ../../verif
 
 ## Analysis tool
 
-All runnable scripts and parsers are located in `./scripts`.
+All runnable scripts, parsers, and example analysis tools are located in `./scripts`.
 
 
 ## Troubleshoot
