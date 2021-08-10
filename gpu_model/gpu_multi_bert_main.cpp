@@ -200,7 +200,7 @@ int main(int argc, char *argv[]){
 	}
 
 	// Deinit (bert, logger, bert_state)
-	cuda_multi_host_context_deinit(bert_state, &gpu_contexts[0]);
+	cuda_multi_host_context_deinit(bert_state, &gpu_contexts[0], params.num_gpus);
 	for (int i = 0; i < params.num_gpus; i++) {
 		cuda_multi_dev_context_deinit(bert_state, &gpu_contexts[i]);
 	}

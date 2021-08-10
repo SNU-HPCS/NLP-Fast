@@ -42,12 +42,10 @@ int cuda_multi_cublas_init(Params *params, gpu_cuda_context_t *gpu_context, int 
 	cublasStatus_t cublas_rc;
 
 	/// used for p2p memcpy
-//	if (gpu_id == 0) {
-//		gpu_context->streams = (cudaStream_t *) malloc(sizeof(cudaStream_t) * params->num_gpus);
-//		for (int t_gpu_idx = 0; t_gpu_idx < params->num_gpus; t_gpu_idx++) {
-//			cudaStreamCreateWithFlags(&gpu_context->streams[t_gpu_idx], cudaStreamNonBlocking);
-//		}
-//	}
+	gpu_context->memcpy_streams = (cudaStream_t *) malloc(sizeof(cudaStream_t) * params->num_gpus);
+	for (int i = 0; i < params->num_gpus; i++) {
+		cudaStreamCreateWithFlags(&gpu_context->memcpy_streams[i], cudaStreamNonBlocking);
+	}
 
 	gpu_context->cublas_handles = (cublasHandle_t*)malloc(sizeof(cublasHandle_t) * 1);
 	if ((cublas_rc = cublasCreate(gpu_context->cublas_handles)) != CUBLAS_STATUS_SUCCESS)  {
@@ -616,6 +614,7 @@ int cuda_multi_bert_main(multi_gpu_thread_arg_t* multi_gpu_arg) {
 	Params *params = multi_gpu_arg->params;
 	BERT_State *bert_state = multi_gpu_arg->bert_state;
 	gpu_cuda_context_t *gpu_context = &multi_gpu_arg->gpu_contexts[gpu_id];
+	gpu_cuda_context_t *gpu_context_all = multi_gpu_arg->gpu_contexts;
 	gpu_cuda_context_t *gpu_context_gpu0 = &multi_gpu_arg->gpu_contexts[0];
 	const int num_batch = bert_state->num_batch;
 	const int num_layer = bert_state->num_layer;
@@ -890,23 +889,25 @@ int cuda_multi_bert_main(multi_gpu_thread_arg_t* multi_gpu_arg) {
 		///////////////////////////////////////////////
 		/// Send partial results to GPU 0 (cudaMemcpyPeer)
 		if (gpu_id != 0) {
+			cudaDeviceSynchronize();	// wait til each GPU's execution has been completed
 			if (params->memcpy_mode != MEMCPY_MODE_NO_ALL_OVERHEAD) {
 				for (int batch_idx = 0; batch_idx < num_batch; batch_idx++) {
-					if ((cuda_rc = cudaMemcpy(
-							&gpu_context_gpu0->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size],
-							&gpu_context->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size],
-							seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
-						fprintf(stderr, "[Send partial results] d_buf_att_fc_result_split cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
-						goto err;
-					}
-//					if ((cuda_rc = cudaMemcpyPeer(
-//							&gpu_context_gpu0->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size], 0,
-//							&gpu_context->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size], gpu_id,
-//							seq_length * hidden_size * sizeof(float))) != cudaSuccess) {
+//					if ((cuda_rc = cudaMemcpy(
+//							&gpu_context_gpu0->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size],
+//							&gpu_context->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size],
+//							seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
 //						fprintf(stderr, "[Send partial results] d_buf_att_fc_result_split cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
 //						goto err;
 //					}
+					if ((cuda_rc = cudaMemcpyPeerAsync(
+							&gpu_context_gpu0->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size], 0,
+							&gpu_context->d_buf_att_fc_result_split[batch_idx][num_head_per_gpu * gpu_id * seq_length * hidden_size], gpu_id,
+							seq_length * hidden_size * sizeof(float), gpu_context->memcpy_streams[0])) != cudaSuccess) {
+						fprintf(stderr, "[Send partial results] d_buf_att_fc_result_split cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
+						goto err;
+					}
 				}
+				cudaStreamSynchronize(gpu_context->memcpy_streams[0]);
 			}
 		}
 
@@ -975,25 +976,29 @@ int cuda_multi_bert_main(multi_gpu_thread_arg_t* multi_gpu_arg) {
 
 
 		/// Broadcast output to GPUs (cudaMemcpyPeer)
-		pthread_barrier_wait(multi_gpu_arg->multi_gpu_barrier_local_att_fc_rsum_rescopy);
-		if (gpu_id != 0) {
+//		pthread_barrier_wait(multi_gpu_arg->multi_gpu_barrier_local_att_fc_rsum_rescopy);	// unnecessary barrier
+		if (gpu_id == 0) {
+			cudaDeviceSynchronize();
 			if (params->memcpy_mode != MEMCPY_MODE_NO_ALL_OVERHEAD) {
-				for (int batch_idx = 0; batch_idx < num_batch; batch_idx++) {
-					if ((cuda_rc = cudaMemcpy(
-							&gpu_context->d_buf_att_layernorm[batch_idx][0],
-							&gpu_context_gpu0->d_buf_att_layernorm[batch_idx][0],
-							seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
-						fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
-						goto err;
+				for (int gpu_idx = 1; gpu_idx < params->num_gpus; gpu_idx++) {
+					for (int batch_idx = 0; batch_idx < num_batch; batch_idx++) {
+						//					if ((cuda_rc = cudaMemcpy(
+						//							&gpu_context->d_buf_att_layernorm[batch_idx][0],
+						//							&gpu_context_gpu0->d_buf_att_layernorm[batch_idx][0],
+						//							seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
+						//						fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
+						//						goto err;
+						//					}
+						if ((cuda_rc = cudaMemcpyPeerAsync(
+								&gpu_context_all[gpu_idx].d_buf_att_layernorm[batch_idx][0], gpu_idx,
+								&gpu_context_gpu0->d_buf_att_layernorm[batch_idx][0], 0,
+								seq_length * hidden_size * sizeof(float), gpu_context_gpu0->memcpy_streams[gpu_idx])) != cudaSuccess) {
+							fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
+							goto err;
+						}
 					}
-//					if ((cuda_rc = cudaMemcpyPeer(
-//							&gpu_context->d_buf_att_layernorm[batch_idx][0], gpu_id,
-//							&gpu_context_gpu0->d_buf_att_layernorm[batch_idx][0], 0,
-//							seq_length * hidden_size * sizeof(float))) != cudaSuccess) {
-//						fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
-//						goto err;
-//					}
 				}
+				cudaDeviceSynchronize();
 			}
 		}
 		pthread_barrier_wait(multi_gpu_arg->multi_gpu_barrier_local_att_fc_rsum_rescopy_done);
@@ -1112,23 +1117,25 @@ int cuda_multi_bert_main(multi_gpu_thread_arg_t* multi_gpu_arg) {
 		///////////////////////////////////////////////
 		/// Send partial results to GPU 0 (cudaMemcpyPeer)
 		if (gpu_id != 0) {
+			cudaDeviceSynchronize();
 			if (params->memcpy_mode != MEMCPY_MODE_NO_ALL_OVERHEAD) {
 				for (int batch_idx = 0; batch_idx < num_batch; batch_idx++) {
-					if ((cuda_rc = cudaMemcpy(
-							&gpu_context_gpu0->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size],
-							&gpu_context->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size],
-							seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
-						fprintf(stderr, "[Send partial results] d_buf_ffw_result_split cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
-						goto err;
-					}
-//					if ((cuda_rc = cudaMemcpyPeer(
-//							&gpu_context_gpu0->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size], 0,
-//							&gpu_context->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size], gpu_id,
-//							seq_length * hidden_size * sizeof(float))) != cudaSuccess) {
+//					if ((cuda_rc = cudaMemcpy(
+//							&gpu_context_gpu0->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size],
+//							&gpu_context->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size],
+//							seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
 //						fprintf(stderr, "[Send partial results] d_buf_ffw_result_split cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
 //						goto err;
 //					}
+					if ((cuda_rc = cudaMemcpyPeerAsync(
+							&gpu_context_gpu0->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size], 0,
+							&gpu_context->d_buf_ffw_result_split[batch_idx][num_ffchunk_per_gpu * gpu_id * seq_length * hidden_size], gpu_id,
+							seq_length * hidden_size * sizeof(float), gpu_context->memcpy_streams[0])) != cudaSuccess) {
+						fprintf(stderr, "[Send partial results] d_buf_ffw_result_split cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
+						goto err;
+					}
 				}
+				cudaStreamSynchronize(gpu_context->memcpy_streams[0]);
 			}
 		}
 
@@ -1196,21 +1203,28 @@ int cuda_multi_bert_main(multi_gpu_thread_arg_t* multi_gpu_arg) {
 
 
 		/// Broadcast output to GPUs (cudaMemcpyPeer)
-		pthread_barrier_wait(multi_gpu_arg->multi_gpu_barrier_local_ffw_rsum_rescopy);
-		if (params->memcpy_mode != MEMCPY_MODE_NO_ALL_OVERHEAD) {
-			for (int batch_idx = 0; batch_idx < num_batch; batch_idx++) {
-				if ((cuda_rc = cudaMemcpy(gpu_context->d_input[batch_idx],
-										  gpu_context_gpu0->d_buf_ffw_layernorm[batch_idx],
-										  seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
-					fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
-					goto err;
+//		pthread_barrier_wait(multi_gpu_arg->multi_gpu_barrier_local_ffw_rsum_rescopy);
+		if (gpu_id == 0) {
+			cudaDeviceSynchronize();
+			if (params->memcpy_mode != MEMCPY_MODE_NO_ALL_OVERHEAD) {
+				for (int gpu_idx = 0; gpu_idx < params->num_gpus; gpu_idx++) {
+					for (int batch_idx = 0; batch_idx < num_batch; batch_idx++) {
+						//				if ((cuda_rc = cudaMemcpy(gpu_context->d_input[batch_idx],
+						//										  gpu_context_gpu0->d_buf_ffw_layernorm[batch_idx],
+						//										  seq_length * hidden_size * sizeof(float), cudaMemcpyDeviceToDevice)) != cudaSuccess) {
+						//					fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
+						//					goto err;
+						//				}
+						if ((cuda_rc = cudaMemcpyPeerAsync(
+								gpu_context_all[gpu_idx].d_input[batch_idx], gpu_idx,
+								gpu_context_gpu0->d_buf_ffw_layernorm[batch_idx], 0,
+								seq_length * hidden_size * sizeof(float), gpu_context_gpu0->memcpy_streams[gpu_idx])) != cudaSuccess) {
+							fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
+							goto err;
+						}
+					}
 				}
-//				if ((cuda_rc = cudaMemcpyPeer(gpu_context->d_input[batch_idx], gpu_id,
-//											  gpu_context_gpu0->d_buf_ffw_layernorm[batch_idx], 0,
-//											  seq_length * hidden_size * sizeof(float))) != cudaSuccess) {
-//					fprintf(stderr, "[copy_res] <d_buf_att_layernorm> cudaMemcpyPeer (cuda_rc: %d)\n", cuda_rc);
-//					goto err;
-//				}
+				cudaDeviceSynchronize();
 			}
 		}
 		pthread_barrier_wait(multi_gpu_arg->multi_gpu_barrier_local_ffw_rsum_rescopy_done);
@@ -1361,7 +1375,13 @@ err:
 }
 
 
-void cuda_multi_host_context_deinit(BERT_State *bert_state, gpu_cuda_context_t *gpu_context) {
+void cuda_multi_host_context_deinit(BERT_State *bert_state, gpu_cuda_context_t *gpu_context, int num_gpus) {
+	if (gpu_context->memcpy_streams) {
+		for (int i = 0; i < num_gpus; i++) {
+			cudaStreamDestroy(gpu_context->memcpy_streams[i]);
+		}
+		free(gpu_context->memcpy_streams);
+	}
 	/// Host memory
 //	cudaFreeHost(gpu_context->h_onevec); gpu_context->h_onevec = nullptr;
 //	cudaFreeHost(gpu_context->h_onemat); gpu_context->h_onemat = nullptr;

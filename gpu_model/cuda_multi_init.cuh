@@ -10,7 +10,7 @@
 typedef struct _gpu_cuda_context_t {
 	int num_streams;
 
-	cudaStream_t *streams;
+	cudaStream_t *memcpy_streams;	// source streams (dedicated for each GPU)
 	cublasHandle_t *cublas_handles;
 //	cusparseHandle_t *cusparse_handles;
 
@@ -102,6 +102,6 @@ int cuda_multi_mem_init(Params *params, BERT_State *bert_state, gpu_cuda_context
 int cuda_multi_bert_main(multi_gpu_thread_arg_t* multi_gpu_arg);
 void dump_gpu_matrix(float *gpu_mem, int M, int N, int gpu_id, const char *prefix_msg);
 void sync_all_buf_to_host(BERT_State *bert_state, gpu_cuda_context_t *gpu_context);
-void cuda_multi_host_context_deinit(BERT_State *bert_state, gpu_cuda_context_t *gpu_context);
+void cuda_multi_host_context_deinit(BERT_State *bert_state, gpu_cuda_context_t *gpu_context, int num_gpus);
 void cuda_multi_dev_context_deinit(BERT_State *bert_state, gpu_cuda_context_t *gpu_context);
 #endif //GPU_MODEL_CUDA_INIT_CUH
