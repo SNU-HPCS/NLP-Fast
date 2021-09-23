@@ -150,3 +150,7 @@ All runnable scripts, parsers, and example analysis tools are located in `./scri
  1. verification mode doesn't work!
     * dump weights and intermediate data from tensorflow (while executing any workloads)
     * If you cannot understand the formats of verification files, please send an email at joonsung90@snu.ac.kr for more details
+
+# Publication
+
+This work has been published in [ISCA '19](https://dl.acm.org/doi/10.1145/3307650.3322214) and [PACT '21](TBA) ([Main talk](https://youtu.be/LOuqoVIage0))
